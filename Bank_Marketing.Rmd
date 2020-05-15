@@ -1,0 +1,728 @@
+---
+title: "Bank_Marketing"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The data is related with direct marketing campaigns (phone calls) of a Portuguese banking institution. The classification goal is to predict if the client will subscribe a term deposit (variable y).
+
+```{r}
+library(dplyr)
+library(caret)
+library(tidyverse)
+library(psych)
+library(ggplot2)
+library(corrplot)
+library(rpart)
+library(rpart.plot)
+library(caretEnsemble)
+library(psych)
+library(pROC)
+library(glue)
+#setwd("~/OneDrive - San Diego State University (SDSU.EDU)/Spring_2020/MIS-749-BA/bank-marketing")
+
+```
+
+Reading the Data
+Data Set Information:
+The data is related with direct marketing campaigns of a Portuguese banking institution. The marketing campaigns were based on phone calls. Often, more than one contact to the same client was required, in order to access if the product (bank term deposit) would be ('yes') or not ('no') subscribed.
+```{r}
+bank_full_data <- read.csv("bank-additional-full.csv",sep = ";",header=TRUE)
+dim(bank_full_data)
+```
+
+DATA EXPLORATION
+
+```{r}
+head(bank_full_data)
+```
+
+What are the Datatypes for the bank marketing data columns
+```{r}
+str(bank_full_data)
+```
+
+Taking subset of the data
+```{r}
+sample_size = 10000
+set.seed(100)
+idxs = sample(1:nrow(bank_full_data),sample_size,replace=F)
+subsample = bank_full_data[idxs,]
+pvalues = list()
+for (col in names(bank_full_data)) {
+  if (class(bank_full_data[,col]) %in% c("numeric","integer")) {
+    # Numeric variable. Using Kolmogorov-Smirnov test
+    
+    pvalues[[col]] = ks.test(subsample[[col]],bank_full_data[[col]])$p.value
+    
+  } else {
+    # Categorical variable. Using Pearson's Chi-square test
+    
+    probs = table(bank_full_data[[col]])/nrow(bank_full_data)
+    pvalues[[col]] = chisq.test(table(subsample[[col]]),p=probs)$p.value
+    
+  }
+}
+print(pvalues)
+
+```
+The records have p-value greater than 0.5. Seems like a good subset
+
+Summary of the data
+```{r}
+bank_mkt_data <- subsample
+summary(bank_mkt_data)
+```
+DATA CLEANING
+
+
+
+Default has 7930 and 0 yes ans 2070 values as Unknown.
+```{r}
+bank_mkt_data$default <- NULL
+```
+
+Checking for Non zero variance attributes
+```{r}
+nzv <- nearZeroVar(bank_mkt_data)
+print(names(bank_mkt_data[nzv]))
+```
+
+
+pdays has 96% values that are 999 which means client was not previously contacted
+```{r}
+histogram(bank_mkt_data$pdays)
+
+```
+
+
+Removing attribute pdays
+```{r}
+bank_mkt_data$pdays <- NULL
+#bank_data <- bank_mkt_data %>% mutate(pdays=ifelse(pdays==999,0,pdays))
+```
+
+
+Check for NA columns and missing values for each column
+```{r}
+sum(is.na(bank_mkt_data))
+```
+
+Changing factor columns to Character as there are many columns with Unknown values
+```{r}
+bank_data <- bank_mkt_data %>% mutate_if(is.factor, as.character)
+
+```
+
+There are no NA values in any columns
+There are unknown values in some columns.
+Changing unkown to NA and then omiting those rows
+
+```{r}
+bank_data[bank_data == "unknown"] <- NA_character_
+bank_data <-na.omit(bank_data)
+```
+
+Target variable: y - has the client subscribed a term deposit? (binary: 'yes', 'no')
+
+```{r}
+
+bank_data$y <- as.factor(bank_data$y)
+#bank_data <- bank_data %>% 
+#  mutate(
+#    y=if_else(y=="yes",1,0))
+#   
+ bank_data$y <- relevel(bank_data$y, ref="yes")
+
+#bank_data <- bank_data %>% mutate_if(is.character, as.factor)
+```
+
+Pre-Processing
+```{r}
+descrCor <- cor(bank_data[,c(1,10:12,14:18)], use = "everything")
+print(descrCor)
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+
+```
+
+```{r}
+print(highlyCorDescr)
+```
+
+
+Social and economic context attributes
+There is a high correlation between emp.var.rate,euribor3m ,nr.employed 
+But they significant to the response variable
+
+Using VIC to determine multicollinearity
+```{r}
+model <- lm(as.integer(y)~.,bank_data)
+car::vif(model)
+```
+
+Using VIc we can see that there is a very high multicollinearity
+Removing nr.employed
+```{r}
+model <- lm(as.integer(y)~.-nr.employed,bank_data)
+car::vif(model)
+```
+Removing nr.employed drastically reduced the VIF score
+Taking out emp.var.rate
+```{r}
+model <- lm(as.integer(y)~.-nr.employed-emp.var.rate-month,bank_data)
+car::vif(model)
+```
+
+
+
+
+Visualizations
+Lets see the distribution of Age
+```{r}
+bank_data %>% 
+  ggplot(., aes(x=age)) +
+  geom_histogram(fill="steelblue")+ggtitle('Age Distributition')
+  
+```
+
+Which Age group subscribed a term deposit
+```{r}
+bank_data %>% 
+  ggplot(., aes(x=age,fill=as.character(y))) +
+  geom_bar(position='dodge')
+ 
+```
+
+What education level people subscribed a term deposit
+```{r}
+bank_data %>% 
+  ggplot(., aes(y=education,fill=as.character(y))) +
+  geom_bar(position="dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+based on job how many subscribed a term deposit
+```{r}
+bank_data %>% 
+  ggplot(., aes(x=job,fill=as.character(y))) +
+  geom_bar(position="dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+```{r}
+
+bank_data %>% 
+  ggplot(., aes(x=loan,fill=as.character(y))) +
+  geom_bar(position="dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+
+```{r}
+bank_data %>% 
+  ggplot(., aes(x=marital,fill=as.character(y))) +
+  geom_bar(position="dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+bank_data %>% 
+  ggplot(., aes(x=housing,fill=as.character(y))) +
+  geom_bar(position="dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+bank_data %>% 
+  ggplot(., aes(x=duration,fill=as.character(y))) +
+  geom_bar(position="dodge")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Distribution of target variable
+```{r}
+table(bank_data$y)
+bank_data %>% 
+  ggplot(., aes(x=factor(y))) +
+  geom_bar(fill="steelblue")+
+  xlab("y")
+  ggtitle('Target Data Distribution')
+```
+Data is highly imbalanced
+There are  rows for 6452 No and only 939 rows for yes
+
+
+
+```{r}
+bank_data.pca <- prcomp(bank_data[,c(1,10:12,14:18)], center = TRUE,scale = TRUE)
+summary(bank_data.pca)
+```
+
+PC1 can explain 38% of variation, PC2 can explain 13%
+
+```{r}
+biplot(bank_data.pca, scale=0)
+```
+
+
+
+```{r}
+cum_p <- cumsum(bank_data.pca$sdev^2 / sum(bank_data.pca$sdev^2))
+plot(cum_p, xlab="PCA", ylab="Cumulative Prop of Variance Explained", ylim=c(0,1), type='b')
+
+```
+
+
+Duration: last contact duration, in seconds (numeric). Important
+note: this attribute highly affects the output target (e.g., if
+duration=0 then y='no'). Yet, the duration is not known before a call
+is performed. Also, after the end of the call y is obviously known.
+Thus, this input should only be included for benchmark purposes and
+should be discarded if the intention is to have a realistic
+predictive model.
+```{r}
+set.seed(1000)
+bank_data$duration <- NULL
+#bank_data$y <- as.factor(bank_data$y)
+bank_data <- bank_data %>% mutate_if(is.character, as.factor)
+ctrl <- trainControl(method = "cv", number=10, summaryFunction=twoClassSummary,
+                      savePredictions=T,classProbs=T)
+#ctrl <- trainControl(method="cv", number=10)
+trainIndex <- createDataPartition(bank_data$y, p=.7, list=F)
+train <- bank_data[trainIndex,]
+valid <- bank_data[-trainIndex,]
+```
+
+```{r}
+table(train$y)
+```
+
+```{r}
+library(DMwR)
+#hybrid both up and down
+set.seed(9560)
+smote_train <- SMOTE(y ~ ., perc.over = 300, k = 5, perc.under = 200,
+                     data  = train)                         
+table(smote_train$y) 
+
+smote_train <-  na.omit(smote_train)
+
+```
+
+
+
+
+Fitting Models using all predictors
+1. Logistic Regression with 10 fold Cross Validation
+```{r}
+set.seed(7000)
+
+smote_train$y <- as.factor(smote_train$y)
+#Logistic regression
+glm.train.fit <- train(y ~ ., data=smote_train, 
+                  method = "glm",
+                  metric="ROC",
+                  family=binomial,
+                  trControl=ctrl)
+summary(glm.train.fit)
+```
+```{r}
+print(glm.train.fit)
+```
+
+```{r}
+#valid$y <- as.factor(valid$y)
+#newdata <-  valid[,!colnames(valid) %in% c("y")]
+#pred <- predict(glm.train.fit,newdata)
+#confusionMatrix(valid$y,pred)
+test.pred.prob <- predict(glm.train.fit, valid, type="prob")
+
+test.pred.class <- predict(glm.train.fit, valid) 
+confusionMatrix(test.pred.class, valid$y)
+log_accuracy <- mean(valid$y == test.pred.class )
+```
+```{r}
+d.log.roc<- roc(response= glm.train.fit$pred$obs, predictor=glm.train.fit$pred$yes)
+test.log.roc<- roc(response= valid$y, predictor=test.pred.prob[[1]]) #assumes postive class Yes is reference level
+plot(test.log.roc, legacy.axes=T)
+plot(d.log.roc, add=T, col="blue")
+legend(x=.2, y=.7, legend=c("Test Logit", "Train Logit"), col=c("black", "blue"),lty=1)
+
+```
+```{r}
+print(glue("Test Area under the curve :{auc(test.log.roc)}"))
+print(glue("Train Area under the curve :{auc(d.log.roc)}"))
+
+```
+
+
+2. Logistic Regression using 10 fold Cross Validation and PCA
+```{r}
+set.seed(7000)
+
+#Logistic regression
+glm.pca.fit <- train(y ~ ., data=smote_train, 
+                  method = "glm",
+                  preProcess="pca",
+                  metric="ROC",
+                  family=binomial,
+                  trControl=ctrl)
+print(glm.pca.fit)
+```
+
+Testing the Logistic Regression for validation set
+```{r}
+#valid$y <- as.factor(valid$y)
+#newdata <-  valid[,!colnames(valid) %in% c("y")]
+#confusionMatrix(valid$y,predict(glm.pca.fit,newdata))
+test.pca.prob <- predict(glm.pca.fit, valid, type="prob")
+test.pca.class <- predict(glm.pca.fit, valid) 
+confusionMatrix(test.pca.class, valid$y)
+log_pca_accuracy <- mean(valid$y == test.pca.class )
+```
+```{r}
+test.pca.roc<- roc(response= valid$y, predictor=test.pca.prob[[1]]) #assumes postive class Yes is reference level
+plot(test.pca.roc, legacy.axes=T,col="red")
+plot(test.log.roc, add=T, col="blue")
+legend(x=.2, y=.7, legend=c("Test PCA", "Test No PCA"), col=c("red", "blue"),lty=1)
+
+```
+```{r}
+print(glue("PCA Area under the curve :{auc(test.pca.roc)}"))
+print(glue("Logistic Regression Area under the curve :{auc(test.log.roc)}"))
+
+```
+
+-euribor3m-nr.employed
+```{r}
+set.seed(7000)
+#Logistic regression
+glm.train.fit_1 <- train(y ~ .-emp.var.rate-nr.employed ,data=smote_train, 
+                  method = "glm",
+                  family=binomial,
+                  metric="ROC",
+                  trControl=ctrl)
+print(glm.train.fit_1)
+
+```
+
+
+Testing the selected feature Logistic Regression
+```{r}
+test.log.prob.1 <- predict(glm.train.fit_1, valid, type="prob")
+test.log.class.1 <- predict(glm.train.fit_1, valid) 
+confusionMatrix(test.log.class.1 , valid$y)
+
+```
+
+
+```{r}
+test.log.roc.1<- roc(response= valid$y, predictor=test.log.prob.1[[1]]) #assumes postive class Yes is reference level
+plot(test.log.roc.1, legacy.axes=T,col="red")
+plot(test.log.roc, add=T, col="blue")
+legend(x=.2, y=.7, legend=c("Test Selected Logistic", "Test Logistic"), col=c("red", "blue"),lty=1)
+```
+```{r}
+plot(test.log.roc.1,legacy.axes=T,col="red")
+plot(test.log.roc,add=T,  col="blue")
+plot(test.pca.roc, add=T,col="green")
+legend(x=.2, y=.7, legend=c("Test Selected Logit", "Test Logit","Test LR PCA"), col=c("red", "blue","green"),lty=1)
+```
+
+```{r}
+print(glue("Selective LoR Area under the curve :{auc(test.log.roc.1)}"))
+print(glue("Logistic Regression Area under the curve :{auc(test.log.roc)}"))
+
+```
+
+There is no change in accuracy by removing correlated features 
+
+```{r}
+
+ridge <- train(
+  y ~., data = smote_train, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 0, lambda = 0)
+  )
+predictions <- ridge %>% predict(valid)
+confusionMatrix(predictions,valid$y)
+```
+```{r}
+lasso <- train(
+  y ~., data = smote_train, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = 0)
+  )
+predictions1 <- lasso %>% predict(valid)
+confusionMatrix(predictions1,valid$y)
+```
+
+
+```{r}
+set.seed(7000)
+#Logistic regression
+glm.train.fit_1 <- train(y ~ .-euribor3m,data=smote_train, 
+                  method = "glm",
+                  metric="ROC",
+                  family=binomial,
+                  trControl=ctrl)
+print(glm.train.fit_1)
+```
+Testing the selected feature Logistic Regression
+```{r}
+test.log.prob.1 <- predict(glm.train.fit_1, valid, type="prob")
+test.log.class.1 <- predict(glm.train.fit_1, valid) 
+confusionMatrix(test.log.class.1 , valid$y)
+
+```
+
+
+
+2. LDA
+```{r}
+set.seed(7000)
+lda.train.fit <- train(y ~ ., data=smote_train, 
+                  method = "lda",
+                  metric="ROC",
+                  family=binomial,
+                  trControl=ctrl)
+print(lda.train.fit)
+d.lda.roc<- roc(response= lda.train.fit$pred$obs, predictor=lda.train.fit$pred$yes)
+```
+
+```{r}
+test.lda.prob <- predict(lda.train.fit, valid, type="prob")
+test.lda.class <- predict(lda.train.fit, valid) 
+confusionMatrix(test.lda.class , valid$y)
+lda_accuracy <- mean(valid$y == test.lda.class )
+test.lda.roc<- roc(response= valid$y, predictor=test.lda.prob[[1]]) 
+```
+
+
+Caret Rpart already prunes the Tree
+```{r}
+set.seed(9000)
+
+rpart.train <- train(y ~. ,data=smote_train, 
+                   method="rpart",
+                   tuneGrid=data.frame(cp = seq(0.01, 0.1, len = 25)),
+                   metric="ROC",
+                   trControl=ctrl)
+print(rpart.train)
+d.rpart.roc<- roc(response= rpart.train$pred$obs, predictor=rpart.train$pred$yes)
+```
+
+```{r}
+library(rpart.plot)
+rpart.plot(rpart.train$finalModel)
+
+```
+
+```{r}
+test.rpart.prob <- predict(rpart.train, valid, type="prob")
+test.rpart.class <- predict(rpart.train, valid) 
+confusionMatrix(test.rpart.class , valid$y)
+test.rpart.roc<- roc(response= valid$y, predictor=test.rpart.prob[[1]]) 
+rpart_accuracy <- mean(valid$y == test.rpart.class )
+```
+
+
+
+Random Forest
+```{r}
+set.seed(1000)
+mtryGrid <- expand.grid(mtry = 2:20)
+rf_random <- train(y~., data=smote_train, method="rf",metric="ROC", tuneGrid=mtryGrid, trControl=ctrl)
+d.rf.roc<- roc(response= rf_random$pred$obs, predictor=rf_random$pred$yes)
+print(rf_random)
+plot(rf_random)
+```
+
+Variable Importance
+```{r}
+varImp(rf_random)
+```
+```{r}
+plot(varImp(rf_random))
+```
+euribor3m, nr.employed, emp.var.rate, age are the most important attributes
+
+
+```{r}
+test.rf.prob <- predict(rf_random, valid, type="prob")
+test.rf.class <- predict(rf_random, valid) 
+confusionMatrix(test.rf.class , valid$y)
+test.rf.roc<- roc(response= valid$y, predictor=test.rf.prob[[1]]) 
+rf_accuracy <- mean(valid$y == test.rf.class )
+```
+
+
+```{r}
+set.seed(1000)
+mtryGrid <- expand.grid(mtry = 2:20)
+rf_random_pca <- train(y~., data=smote_train, method="rf", metric="ROC",preProcess="pca",  tuneGrid=mtryGrid, trControl=ctrl)
+print(rf_random_pca)
+plot(rf_random_pca)
+```
+
+```{r}
+test.rf.pca.prob <- predict(rf_random_pca, valid, type="prob")
+test.rf.pca.class <- predict(rf_random_pca, valid) 
+confusionMatrix(test.rf.pca.class , valid$y)
+rf_pca_accuracy <- mean(valid$y == test.rf.pca.class )
+test.rf.pca.roc<- roc(response= valid$y, predictor=test.rf.pca.prob[[1]]) 
+```
+
+SVM
+se train()'s tuneGrid parameter to do some sensitivity analysis around the values C = 1 and sigma = 0.015 that produced the model with the best ROC value. Note that R's expand.grid() function is used to build a dataframe contain all the combinations of C and sigma we want to look at.
+```{r}
+#ctrl <- trainControl(method = "cv", savePred=T)
+svmGrid <- expand.grid(sigma = c(.01, .015, 0.2),
+                    C = c(1:10)
+)
+#svmGrid <- expand.grid(sigma= c(-25, -20, -15,-10, -5, 0), C= c(0:5))
+svm.train <- train(y ~., data=smote_train, 
+                     method="svmRadial",
+                     metric="ROC",
+                     preProcess = c("center","scale"),
+                     trControl=ctrl,
+                     tuneGrid=svmGrid)
+svm.train
+d.svm.roc<- roc(response= svm.train$pred$obs, predictor=svm.train$pred$yes)
+```
+This was quite a bit of calculation for an improvement of 0.0003247 in the ROC score, but it shows off some of what caret can do.
+```{r}
+plot(svm.train)
+```
+
+```{r}
+test.svm.prob <- predict(svm.train, valid, type="prob")
+test.svm.class <- predict(svm.train, valid) 
+confusionMatrix(test.svm.class , valid$y)
+test.svm.roc<- roc(response= valid$y, predictor=test.svm.prob[[1]]) 
+svm_accuracy <- mean(valid$y == test.svm.class )
+```
+
+
+
+GBM
+fter reading in the data and dividing it into training and test data sets, caret's trainControl() and expand.grid() functions are used to set up to train the gbm model on all of the combinations of represented in the data frame built by expand.grid(). Then train() function does the actual training and fitting of the model..
+```{r}
+set.seed(100)
+gbmGrid <-expand.grid(interaction.depth = c(1, 5, 9), 
+                        n.trees = (1:30), 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 20)
+boost.train <- train(y ~ ., data=smote_train, 
+                     method="gbm",
+                     metric="ROC",
+                     trControl=ctrl,
+                     tuneGrid=gbmGrid)
+print(summary(boost.train))
+d.gbm.roc<- roc(response= boost.train$pred$obs, predictor=boost.train$pred$yes)
+```
+
+```{r}
+plot(boost.train)
+```
+
+```{r}
+test.gbm.prob <- predict(boost.train, valid, type="prob")
+test.gbm.class <- predict(boost.train, valid) 
+confusionMatrix(test.gbm.class , valid$y)
+test.gbm.roc<- roc(response= valid$y, predictor=test.gbm.prob[[1]]) 
+gbm_accuracy <- mean(valid$y == test.gbm.class )
+```
+```{r}
+histogram(~test.gbm.prob[[1]]|valid$y,xlab="Probability of Poor Segmentation")
+
+```
+
+
+KNN
+```{r}
+set.seed(400)
+knnFit <- train(y ~ ., data = train, method = "knn",metric="ROC", trControl = ctrl, preProcess = c("center","scale"), tuneGrid = expand.grid(k = c(5:25)))
+print(knnFit)
+d.knn.roc<- roc(response= knnFit$pred$obs, predictor=knnFit$pred$yes)
+```
+
+```{r}
+test.knn.prob <- predict(knnFit, valid, type="prob")
+test.knn.class <- predict(knnFit, valid) 
+confusionMatrix(test.knn.class , valid$y)
+test.knn.roc<- roc(response= valid$y, predictor=test.knn.prob[[1]]) 
+knn_accuracy <- mean(valid$y == test.knn.class )
+```
+```{r}
+histogram(~test.knn.prob[[1]]|valid$y,xlab="Probability of Poor Segmentation")
+```
+
+
+Training ROCS
+```{r}
+plot(d.log.roc, legacy.axes=T,main= "Train ROC curves for Log,SVM,GBM,KNN and RF models")
+plot(d.svm.roc, add=T, col="Yellow")
+plot(d.gbm.roc, add=T, col="Blue")
+plot(d.knn.roc, add=T, col="Red")
+plot(d.rf.roc, add=T, col="Orange")
+plot(d.rpart.roc, add=T, col="Pink")
+plot(d.lda.roc, add=T, col="Green")
+legend(x=.2, y=.7, legend=c("Logistic Regression", "SVM", "GBM","KNN","RF","DT","LDA"), col=c("black","Yellow","Blue","Red","Orange","Pink","Green"),lty=1)
+
+
+```
+
+Test ROC
+```{r}
+plot(test.log.roc, legacy.axes=T,main= "Test ROC curves for Log,SVM,GBM,KNN and RF models")
+plot(test.svm.roc, add=T, col="Yellow")
+plot(test.gbm.roc, add=T, col="Blue")
+plot(test.knn.roc, add=T, col="Red")
+plot(test.rf.roc, add=T, col="Orange")
+plot(test.rpart.roc, add=T, col="Pink")
+plot(test.lda.roc, add=T, col="Green")
+legend(x=.2, y=.7, legend=c("Logistic Regression", "SVM", "GBM","KNN","RF","DT","LDA"), col=c("black","Yellow","Blue","Red","Orange","Pink","Green"),lty=1)
+
+```
+
+
+Test AUC Cmparison
+```{r}
+result_auc <- data_frame("Models"=c("Logistic Regression","SVM","GBM","KNN","RF","Decision Tree"),
+                     "AUC"=c(auc(test.log.roc),auc(test.svm.roc),auc(test.gbm.roc),auc(test.knn.roc),auc(test.rf.roc),auc(test.rpart.roc)))
+print(result_auc)
+```
+
+Test Accuracy Comparison
+```{r}
+accuracy <- data_frame("Models"=c("Logistic Regression","Log_PCA","LDA","GBM","KNN","RF","RF_PCA","SVM","Decision Tree"),
+                       "AUC"=c(auc(test.log.roc),auc(test.pca.roc),auc(test.lda.roc),auc(test.gbm.roc),auc(test.knn.roc),auc(test.rf.roc),auc(test.rf.pca.roc),auc(test.svm.roc),auc(test.rpart.roc)),
+                     "Test Accuracy"=c(log_accuracy,log_pca_accuracy,lda_accuracy,gbm_accuracy,knn_accuracy,rf_accuracy,rf_pca_accuracy,svm_accuracy,rpart_accuracy))
+print(accuracy)
+```
+
+
+```{r}
+rValues <- resamples(list(glm = glm.train.fit,lda=lda.train.fit, rf=rf_random,svm=svm.train,gbm=boost.train,knn=knnFit,DT=rpart.train))
+#rValues$values
+print(summary(rValues))
+ 
+```
+```{r}
+bwplot(rValues, layout = c(7, 1))
+```
+
+
+```{r}
+bwplot(rValues,metric="ROC",main=" GLM vs LDA vs RF vs SVM vs GBM vs KNN vs DT")	# boxplot
+
+```
+
